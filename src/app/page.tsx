@@ -66,23 +66,37 @@ function blockPose(block: Block, core: RigidBody) {
 
 function captureField(sim: Sim) {
   const inner = sim.planetRadius + .25; const outer = sim.planetRadius + 4.1; const middle = (inner + outer) / 2;
-  return { inner, outer, sectors: Math.ceil(12 * middle / 5.275) };
+  return { inner, outer, middle, sectors: 72 };
 }
 
-function occupiedAtmosphereSectors(sim: Sim) {
+function atmosphereCoverage(sim: Sim) {
   const occupied = new Set<number>();
   const field = captureField(sim);
   const center = sim.core.translation();
   sim.blocks.filter((block) => block.attached && !block.removed).forEach((block) => {
     const position = blockPose(block, sim.core).position; const dx = position.x - center.x; const dy = position.y - center.y; const radius = Math.hypot(dx, dy);
-    if (radius >= field.inner && radius < field.outer) occupied.add(Math.floor(((Math.atan2(dy, dx) + Math.PI * 2) % (Math.PI * 2)) / (Math.PI * 2) * field.sectors));
+    if (radius < field.inner || radius >= field.outer) return;
+    const centerSector = ((Math.atan2(dy, dx) + Math.PI * 2) % (Math.PI * 2)) / (Math.PI * 2) * field.sectors;
+    const halfSpan = Math.max(1, Math.ceil(Math.asin(Math.min(.95, BLOCK * 1.08 / radius)) / (Math.PI * 2) * field.sectors));
+    for (let offset = -halfSpan; offset <= halfSpan; offset++) occupied.add((Math.floor(centerSector) + offset + field.sectors) % field.sectors);
   });
-  return occupied;
+  let largestGap = 0; let currentGap = 0;
+  for (let i = 0; i < field.sectors * 2; i++) {
+    if (occupied.has(i % field.sectors)) currentGap = 0;
+    else { currentGap++; largestGap = Math.max(largestGap, Math.min(currentGap, field.sectors)); }
+  }
+  const gapDegrees = largestGap * 360 / field.sectors;
+  return { occupied, gapDegrees, complete: occupied.size > 0 && gapDegrees <= 30, charge: Math.max(0, Math.min(1, (360 - gapDegrees) / 330)) };
 }
 
 function bandCharge(sim: Sim) {
-  const field = captureField(sim);
-  return Math.min(1, occupiedAtmosphereSectors(sim).size / Math.ceil(field.sectors * .72));
+  return atmosphereCoverage(sim).charge;
+}
+
+function compressedPlanetRadius(radius: number, blockCount: number) {
+  const compressedArea = blockCount * Math.pow(BLOCK * 2, 2) * .32;
+  const areaRadius = Math.sqrt(radius * radius + compressedArea / Math.PI);
+  return radius + Math.max(.35, Math.min(.8, areaRadius - radius));
 }
 
 function unfreezeBlock(sim: Sim, block: Block, now: number, velocityBoost = { x: 0, y: 0 }) {
@@ -247,9 +261,11 @@ export default function Home() {
       });
 
       sim.blocks.filter((block) => !block.removed).forEach((block) => {
-        const pose = blockPose(block, sim.core); const p = screen(pose.position.x, pose.position.y); const size = BLOCK * SCALE;
+        const pose = blockPose(block, sim.core); let renderPosition = pose.position; const size = BLOCK * SCALE;
         const beingAbsorbed = Boolean(sim.absorption?.blocks.includes(block));
-        ctx.save(); ctx.globalAlpha = beingAbsorbed ? 1 - absorptionProgress * .72 : 1; ctx.translate(p.x, p.y); ctx.rotate(pose.rotation); if (beingAbsorbed) ctx.scale(1 - absorptionProgress * .32, 1 - absorptionProgress * .32); ctx.shadowBlur = block.attached ? 4 : 7; ctx.shadowColor = "rgba(145,170,182,.45)"; ctx.fillStyle = beingAbsorbed ? "#e8f0f2" : block.color;
+        if (beingAbsorbed && sim.absorption) { const dx = pose.position.x - coreWorld.x; const dy = pose.position.y - coreWorld.y; const angle = Math.atan2(dy, dx); const targetRadius = (sim.planetRadius + compressedPlanetRadius(sim.planetRadius, sim.absorption.blocks.length)) / 2; const eased = 1 - Math.pow(1 - absorptionProgress, 3); const radius = Math.hypot(dx, dy) + (targetRadius - Math.hypot(dx, dy)) * eased; renderPosition = { x: coreWorld.x + Math.cos(angle) * radius, y: coreWorld.y + Math.sin(angle) * radius }; }
+        const p = screen(renderPosition.x, renderPosition.y);
+        ctx.save(); ctx.globalAlpha = beingAbsorbed ? 1 - absorptionProgress * .82 : 1; ctx.translate(p.x, p.y); ctx.rotate(pose.rotation); if (beingAbsorbed) ctx.scale(1 - absorptionProgress * .82, 1 - absorptionProgress * .82); ctx.shadowBlur = block.attached ? 4 : 7; ctx.shadowColor = "rgba(145,170,182,.45)"; ctx.fillStyle = beingAbsorbed ? "#e8f0f2" : block.color;
         traceIce(ctx, size, block.variant); ctx.fill();
         ctx.strokeStyle = "rgba(225,235,239,.48)"; ctx.lineWidth = 1.2; ctx.stroke(); ctx.fillStyle = "rgba(245,250,252,.09)"; ctx.fillRect(-BLOCK * SCALE + 3, -BLOCK * SCALE + 3, BLOCK * 1.35 * SCALE, 3); ctx.restore();
       });
@@ -276,12 +292,9 @@ export default function Home() {
       });
 
       if (sim.absorption) {
-        const activeField = captureField(sim); const startRadius = (activeField.inner + activeField.outer) / 2; const endRadius = sim.planetRadius + .45; const radius = (startRadius + (endRadius - startRadius) * absorptionProgress) * SCALE;
-        ctx.save(); ctx.translate(coreScreen.x, coreScreen.y); ctx.strokeStyle = `rgba(210,247,255,${.9 - absorptionProgress * .35})`; ctx.lineWidth = 7 - absorptionProgress * 3; ctx.shadowBlur = 28; ctx.shadowColor = "#88ebff"; ctx.beginPath(); ctx.arc(0, 0, radius * (1 - absorptionProgress * .08), 0, Math.PI * 2); ctx.stroke(); ctx.restore();
-        ctx.save(); ctx.fillStyle = "rgba(3,16,29,.86)"; ctx.beginPath(); ctx.roundRect(VIEW / 2 - 205, VIEW / 2 - 65, 410, 130, 24); ctx.fill(); ctx.strokeStyle = "rgba(133,232,255,.72)"; ctx.lineWidth = 2; ctx.stroke();
-        ctx.textAlign = "center"; ctx.fillStyle = "#eaffff"; ctx.font = "900 25px Arial"; ctx.fillText("CAPTURE FIELD SATURATED", VIEW / 2, VIEW / 2 - 16);
-        ctx.fillStyle = "#79def6"; ctx.font = "700 11px Arial"; ctx.fillText("COMPRESSING ICE MANTLE • RELEASING VOLATILES", VIEW / 2, VIEW / 2 + 12);
-        ctx.fillStyle = "rgba(113,221,246,.22)"; ctx.fillRect(VIEW / 2 - 145, VIEW / 2 + 30, 290, 7); ctx.fillStyle = "#7be6ff"; ctx.fillRect(VIEW / 2 - 145, VIEW / 2 + 30, 290 * absorptionProgress, 7); ctx.restore();
+        const outer = compressedPlanetRadius(sim.planetRadius, sim.absorption.blocks.length); const radius = (sim.planetRadius + outer) / 2 * SCALE;
+        ctx.save(); ctx.translate(coreScreen.x, coreScreen.y); ctx.strokeStyle = `rgba(205,235,240,${.22 + absorptionProgress * .78})`; ctx.lineWidth = Math.max(3, (outer - sim.planetRadius) * SCALE * absorptionProgress); ctx.shadowBlur = 5 + absorptionProgress * 16; ctx.shadowColor = "#9cc6cf"; ctx.beginPath(); ctx.arc(0, 0, radius, 0, Math.PI * 2); ctx.stroke();
+        ctx.shadowBlur = 0; ctx.textAlign = "center"; ctx.fillStyle = `rgba(225,244,247,${.45 + absorptionProgress * .55})`; ctx.font = "800 10px Arial"; ctx.fillText("MANTLE FUSING", 0, -radius - 12); ctx.restore();
       }
 
       if (sim.flash > performance.now()) { ctx.fillStyle = `rgba(181,241,255,${Math.max(0, (sim.flash - performance.now()) / 400)})`; ctx.fillRect(0, 0, VIEW, VIEW); }
@@ -393,32 +406,30 @@ export default function Home() {
         });
         sim.blocks = sim.blocks.filter((b) => !b.removed);
 
-        // Score radial coverage, then hold a clear three-second completion ceremony.
+        // Condense the complete angular envelope into a permanent mantle.
         if (sim.absorption && now - sim.absorption.started >= sim.absorption.duration) {
           const completed = sim.absorption;
           completed.blocks.forEach((block) => { if (block.collider) try { sim.world.removeCollider(block.collider, true); } catch {} block.removed = true; });
           sim.blocks = sim.blocks.filter((block) => !block.removed);
           const oldRadius = sim.planetRadius;
-          const compressedArea = completed.blocks.length * Math.pow(BLOCK * 2, 2) * .32;
-          const areaRadius = Math.sqrt(oldRadius * oldRadius + compressedArea / Math.PI);
-          sim.planetRadius = oldRadius + Math.max(.35, Math.min(.8, areaRadius - oldRadius));
+          sim.planetRadius = compressedPlanetRadius(oldRadius, completed.blocks.length);
           sim.mantles.push({ inner: oldRadius, outer: sim.planetRadius, color: MANTLE_COLORS[sim.rings % MANTLE_COLORS.length] });
           sim.world.removeCollider(sim.coreCollider, true);
           sim.coreCollider = sim.world.createCollider(RAPIER.ColliderDesc.ball(sim.planetRadius).setDensity(3).setFriction(1).setRestitution(.06)
             .setActiveEvents(RAPIER.ActiveEvents.CONTACT_FORCE_EVENTS).setContactForceEventThreshold(28), sim.core);
-          sim.rings++; sim.score += 1200; sim.flash = now + 850; sim.absorption = null;
+          sim.rings++; sim.score += 1200; sim.absorption = null;
           releaseDisconnectedIce(sim, now);
           sim.message = "New ice mantle fused—volatiles released into the atmosphere";
         }
 
         if (!sim.absorption) {
-          const occupied = occupiedAtmosphereSectors(sim);
+          const coverage = atmosphereCoverage(sim);
           const field = captureField(sim);
           const corePos = sim.core.translation();
-          if (occupied.size >= Math.ceil(field.sectors * .72)) {
+          if (coverage.complete) {
             const absorbed = sim.blocks.filter((b) => { const t = blockPose(b, sim.core).position; const r = Math.hypot(t.x - corePos.x, t.y - corePos.y); return b.attached && r >= field.inner && r < field.outer; });
-            sim.absorption = { blocks: absorbed, started: now, duration: 3400 };
-            sim.message = "Capture field saturated—mantle compression initiated";
+            sim.absorption = { blocks: absorbed, started: now, duration: 1150 };
+            sim.message = "Angular envelope complete—mantle fusing";
           }
         }
         if (Math.hypot(sim.core.translation().x, sim.core.translation().y) > 25.5) { sim.over = true; sim.message = "The asteroid escaped the gravity well"; }
@@ -467,7 +478,7 @@ export default function Home() {
         <div><span>Hull clearance</span><strong className={hud.clearance < 5 ? styles.danger : ""}>{hud.clearance.toFixed(1)}</strong><small>TO PLANET SURFACE</small></div>
         <div><span>Payload impulse</span><strong>{LAUNCH_SPEED}</strong><small>PLUS SHIP VELOCITY</small></div>
         <div><span>Core drift</span><strong className={hud.drift > .68 ? styles.danger : ""}>{Math.min(999, Math.round(hud.drift * 100))}%</strong><small>LOSS AT 100%</small></div>
-        <div><span>Capture field</span><strong>{Math.round(hud.bandCharge * 100)}%</strong><small>COMPRESSES AT 100%</small></div>
+        <div><span>Capture field</span><strong>{Math.round(hud.bandCharge * 100)}%</strong><small>NO EMPTY ARC OVER 30°</small></div>
         <div><span>Planet radius</span><strong>{hud.planetRadius.toFixed(1)}</strong><small>GROWS WITH EACH MANTLE</small></div>
         <div className={styles.loaded}><span>Loaded payload</span><strong>{hud.payloadReady ? "ON SHIP" : "RELOADING"}</strong><small>{hud.shielded ? "HULL SHIELD ACTIVE" : hud.payloadReady ? "BONDED UNTIL IMPACT" : "NEXT PAYLOAD INBOUND"}</small></div>
       </aside>
