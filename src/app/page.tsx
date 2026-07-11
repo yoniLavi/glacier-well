@@ -10,7 +10,8 @@ const SCALE = 11;
 const VIEW = 800;
 const BLOCK = .88;
 const BARREL_LENGTH = 3.65;
-const ICE_COLOR = "#8beaff";
+const ICE_COLOR = "#9aaab2";
+const MANTLE_COLORS = ["#68737a", "#7b776f", "#59656b", "#827d73"];
 const SHAPES = [
   [[-1, 0], [0, 0], [1, 0], [2, 0]],
   [[0, 0], [1, 0], [0, 1], [1, 1]],
@@ -239,22 +240,22 @@ export default function Home() {
           if (!group.blocks[i].body || !group.blocks[j].body) continue;
           const a = group.blocks[i].body!.translation(); const b = group.blocks[j].body!.translation();
           if (Math.hypot(a.x - b.x, a.y - b.y) > BLOCK * 2.5) continue;
-          const ap = screen(a.x, a.y); const bp = screen(b.x, b.y); ctx.strokeStyle = "rgba(220,250,255,.72)"; ctx.lineWidth = 5; ctx.beginPath(); ctx.moveTo(ap.x, ap.y); ctx.lineTo(bp.x, bp.y); ctx.stroke();
+          const ap = screen(a.x, a.y); const bp = screen(b.x, b.y); ctx.strokeStyle = "rgba(185,204,213,.46)"; ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(ap.x, ap.y); ctx.lineTo(bp.x, bp.y); ctx.stroke();
         }
       });
 
       sim.blocks.filter((block) => !block.removed).forEach((block) => {
         const pose = blockPose(block, sim.core); const p = screen(pose.position.x, pose.position.y); const size = BLOCK * SCALE;
         const beingAbsorbed = Boolean(sim.absorption?.blocks.includes(block));
-        ctx.save(); ctx.globalAlpha = beingAbsorbed ? 1 - absorptionProgress * .72 : 1; ctx.translate(p.x, p.y); ctx.rotate(pose.rotation); if (beingAbsorbed) ctx.scale(1 - absorptionProgress * .32, 1 - absorptionProgress * .32); ctx.shadowBlur = block.attached ? 12 : 18; ctx.shadowColor = block.color; ctx.fillStyle = beingAbsorbed ? "#f4fbff" : block.color;
+        ctx.save(); ctx.globalAlpha = beingAbsorbed ? 1 - absorptionProgress * .72 : 1; ctx.translate(p.x, p.y); ctx.rotate(pose.rotation); if (beingAbsorbed) ctx.scale(1 - absorptionProgress * .32, 1 - absorptionProgress * .32); ctx.shadowBlur = block.attached ? 4 : 7; ctx.shadowColor = "rgba(145,170,182,.45)"; ctx.fillStyle = beingAbsorbed ? "#e8f0f2" : block.color;
         traceIce(ctx, size, block.variant); ctx.fill();
-        ctx.strokeStyle = "rgba(255,255,255,.72)"; ctx.lineWidth = 1.5; ctx.stroke(); ctx.fillStyle = "rgba(255,255,255,.18)"; ctx.fillRect(-BLOCK * SCALE + 3, -BLOCK * SCALE + 3, BLOCK * 1.45 * SCALE, 4); ctx.restore();
+        ctx.strokeStyle = "rgba(225,235,239,.48)"; ctx.lineWidth = 1.2; ctx.stroke(); ctx.fillStyle = "rgba(245,250,252,.09)"; ctx.fillRect(-BLOCK * SCALE + 3, -BLOCK * SCALE + 3, BLOCK * 1.35 * SCALE, 3); ctx.restore();
       });
 
       const coreP = screen(coreWorld.x, coreWorld.y); ctx.save(); ctx.translate(coreP.x, coreP.y); ctx.rotate(sim.core.rotation());
-      ctx.shadowBlur = 34 + Math.sin(performance.now() / 180) * 8; ctx.shadowColor = "#74eaff"; ctx.fillStyle = "#dffaff"; ctx.beginPath(); ctx.arc(0, 0, sim.planetRadius * SCALE, 0, Math.PI * 2); ctx.fill();
-      ctx.fillStyle = "#f8ffff"; ctx.beginPath(); ctx.arc(0, 0, 3.05 * SCALE, 0, Math.PI * 2); ctx.fill();
-      sim.mantles.forEach((mantle) => { ctx.strokeStyle = mantle.color; ctx.lineWidth = (mantle.outer - mantle.inner) * SCALE; ctx.shadowBlur = 10; ctx.shadowColor = mantle.color; ctx.beginPath(); ctx.arc(0, 0, ((mantle.inner + mantle.outer) / 2) * SCALE, 0, Math.PI * 2); ctx.stroke(); });
+      ctx.shadowBlur = 7; ctx.shadowColor = "rgba(120,140,150,.38)"; ctx.fillStyle = "#747f85"; ctx.beginPath(); ctx.arc(0, 0, sim.planetRadius * SCALE, 0, Math.PI * 2); ctx.fill();
+      ctx.shadowBlur = 24 + Math.sin(performance.now() / 180) * 5; ctx.shadowColor = "#74eaff"; ctx.fillStyle = "#f8ffff"; ctx.beginPath(); ctx.arc(0, 0, 3.05 * SCALE, 0, Math.PI * 2); ctx.fill();
+      ctx.shadowBlur = 0; sim.mantles.forEach((mantle) => { ctx.strokeStyle = mantle.color; ctx.lineWidth = (mantle.outer - mantle.inner) * SCALE; ctx.beginPath(); ctx.arc(0, 0, ((mantle.inner + mantle.outer) / 2) * SCALE, 0, Math.PI * 2); ctx.stroke(); });
       ctx.shadowBlur = 0; ctx.fillStyle = "rgba(79,190,220,.22)"; ctx.beginPath(); ctx.ellipse(-10, -7, 7, 4, -.35, 0, Math.PI * 2); ctx.fill(); ctx.beginPath(); ctx.ellipse(12, 9, 4, 6, .4, 0, Math.PI * 2); ctx.fill(); ctx.restore();
 
       const cannon = screen(cannonState.cannon.x, cannonState.cannon.y);
@@ -264,7 +265,7 @@ export default function Home() {
       const loadedColor = ICE_COLOR;
       SHAPES[sim.nextShape].forEach(([gx, gy], index) => {
         const offset = rotate(gx * BLOCK * 2.05, gy * BLOCK * 2.05, cannonState.direction); const p = screen(cannonState.muzzle.x + offset.x, cannonState.muzzle.y + offset.y);
-        ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(cannonState.direction); ctx.shadowBlur = 14; ctx.shadowColor = loadedColor; ctx.fillStyle = loadedColor; traceIce(ctx, BLOCK * SCALE, index % 3); ctx.fill(); ctx.strokeStyle = "rgba(255,255,255,.8)"; ctx.lineWidth = 1.5; ctx.stroke(); ctx.restore();
+        ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(cannonState.direction); ctx.shadowBlur = 6; ctx.shadowColor = "rgba(145,170,182,.45)"; ctx.fillStyle = loadedColor; traceIce(ctx, BLOCK * SCALE, index % 3); ctx.fill(); ctx.strokeStyle = "rgba(225,235,239,.55)"; ctx.lineWidth = 1.2; ctx.stroke(); ctx.restore();
       });
 
       if (sim.absorption) {
@@ -378,8 +379,7 @@ export default function Home() {
           const compressedArea = completed.blocks.length * Math.pow(BLOCK * 2, 2) * .32;
           const areaRadius = Math.sqrt(oldRadius * oldRadius + compressedArea / Math.PI);
           sim.planetRadius = oldRadius + Math.max(.35, Math.min(.8, areaRadius - oldRadius));
-          const mantleColors = ["#8deaff", "#b3d7ff", "#d0c3ff", "#91f0d0"];
-          sim.mantles.push({ inner: oldRadius, outer: sim.planetRadius, color: mantleColors[sim.rings % mantleColors.length] });
+          sim.mantles.push({ inner: oldRadius, outer: sim.planetRadius, color: MANTLE_COLORS[sim.rings % MANTLE_COLORS.length] });
           sim.world.removeCollider(sim.coreCollider, true);
           sim.coreCollider = sim.world.createCollider(RAPIER.ColliderDesc.ball(sim.planetRadius).setDensity(3).setFriction(1).setRestitution(.06)
             .setActiveEvents(RAPIER.ActiveEvents.CONTACT_FORCE_EVENTS).setContactForceEventThreshold(28), sim.core);
