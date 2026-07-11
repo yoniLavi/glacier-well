@@ -12,6 +12,9 @@ const SHIP_NOSE = 2.2;
 const SHIP_RADIUS = 1.25;
 const LAUNCH_SPEED = 20;
 const BOND_BREAK_FORCE = 250;
+const PAYLOAD_RELOAD_MS = 1100;
+const SHIELD_DURATION_MS = 1100;
+const SHIELD_REFRACTORY_MS = 5000;
 const ICE_COLOR = "#9aaab2";
 const MANTLE_COLORS = ["#68737a", "#7b776f", "#59656b", "#827d73"];
 const SHAPES = [
@@ -36,13 +39,13 @@ type Sim = {
   ship: RigidBody; shipCollider: Collider;
   mantles: Array<{ inner: number; outer: number; color: string }>; blocks: Block[]; groups: Group[];
   escapedGroups: Set<number>;
-  nextShape: number; payloadReadyAt: number; invulnerableUntil: number;
+  nextShape: number; payloadReadyAt: number; invulnerableUntil: number; shieldReadyAt: number;
   score: number; rings: number; escapes: number; shots: number; over: boolean; paused: boolean;
   lastTime: number; accumulator: number; groupId: number; flash: number; fusionNoticeUntil: number; message: string; absorption: Absorption | null;
 };
-type HUD = { ready: boolean; score: number; rings: number; escapes: number; shipSpeed: number; clearance: number; drift: number; bandCharge: number; planetRadius: number; message: string; over: boolean; paused: boolean; absorbing: boolean; nextShape: number; payloadReady: boolean; shielded: boolean };
+type HUD = { ready: boolean; score: number; rings: number; escapes: number; shipSpeed: number; clearance: number; drift: number; bandCharge: number; planetRadius: number; message: string; over: boolean; paused: boolean; absorbing: boolean; nextShape: number; payloadReady: boolean; shielded: boolean; shieldReady: boolean };
 
-const initialHUD: HUD = { ready: false, score: 0, rings: 0, escapes: 0, shipSpeed: 0, clearance: 20, drift: 0, bandCharge: 0, planetRadius: 3.1, message: "Cooling the gravity well…", over: false, paused: false, absorbing: false, nextShape: 2, payloadReady: false, shielded: false };
+const initialHUD: HUD = { ready: false, score: 0, rings: 0, escapes: 0, shipSpeed: 0, clearance: 20, drift: 0, bandCharge: 0, planetRadius: 3.1, message: "Cooling the gravity well…", over: false, paused: false, absorbing: false, nextShape: 2, payloadReady: false, shielded: false, shieldReady: true };
 const rotate = (x: number, y: number, angle: number) => ({ x: x * Math.cos(angle) - y * Math.sin(angle), y: x * Math.sin(angle) + y * Math.cos(angle) });
 const screen = (x: number, y: number) => ({ x: VIEW / 2 + x * SCALE, y: VIEW / 2 + y * SCALE });
 const gravityStrength = (radius: number) => 3.2 * Math.tanh(radius / 5) + 1.05 * radius * Math.exp(-(radius * radius) / (2 * 22 * 22));
@@ -183,13 +186,13 @@ export default function Home() {
     drift: Math.hypot(sim.core.translation().x, sim.core.translation().y) / 25.5, bandCharge: bandCharge(sim), planetRadius: sim.planetRadius,
     message: sim.message,
     over: sim.over, paused: sim.paused, absorbing: Boolean(sim.absorption), nextShape: sim.nextShape,
-    payloadReady: performance.now() >= sim.payloadReadyAt, shielded: performance.now() < sim.invulnerableUntil,
+    payloadReady: performance.now() >= sim.payloadReadyAt, shielded: performance.now() < sim.invulnerableUntil, shieldReady: performance.now() >= sim.shieldReadyAt,
   }), []);
 
   const fire = useCallback(() => {
     const sim = simRef.current;
     if (!sim || !launchPayload(sim, LAUNCH_SPEED)) return;
-    sim.payloadReadyAt = performance.now() + 1100;
+    sim.payloadReadyAt = performance.now() + PAYLOAD_RELOAD_MS;
     sim.message = "Projectile committed—watch the torque"; syncHUD(sim);
   }, [syncHUD]);
 
@@ -219,7 +222,7 @@ export default function Home() {
       const ship = world.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setTranslation(0, -25).setRotation(Math.PI / 2).setLinvel(8.2, 0).setLinearDamping(.012).setAngularDamping(1.8).setCcdEnabled(true));
       const shipShape = RAPIER.ColliderDesc.roundConvexHull(new Float32Array([2.1, 0, -.9, -1.15, -1.35, 0, -.9, 1.15]), .22) ?? RAPIER.ColliderDesc.ball(SHIP_RADIUS);
       const shipCollider = world.createCollider(shipShape.setDensity(1.4).setFriction(.55).setRestitution(.12), ship);
-      const sim: Sim = { world, events, core, coreCollider, planetRadius: 3.1, ship, shipCollider, mantles: [], blocks: [], groups: [], escapedGroups: new Set(), nextShape: 2, payloadReadyAt: 0, invulnerableUntil: 0, score: 0, rings: 0, escapes: 0, shots: 0, over: false, paused: false, lastTime: performance.now(), accumulator: 0, groupId: 0, flash: 0, fusionNoticeUntil: 0, message: "Free flight established—thrust, turn, and seed the planet", absorption: null };
+      const sim: Sim = { world, events, core, coreCollider, planetRadius: 3.1, ship, shipCollider, mantles: [], blocks: [], groups: [], escapedGroups: new Set(), nextShape: 2, payloadReadyAt: 0, invulnerableUntil: 0, shieldReadyAt: 0, score: 0, rings: 0, escapes: 0, shots: 0, over: false, paused: false, lastTime: performance.now(), accumulator: 0, groupId: 0, flash: 0, fusionNoticeUntil: 0, message: "Free flight established—thrust, turn, and seed the planet", absorption: null };
       simRef.current = sim; syncHUD(sim);
     };
 
@@ -341,7 +344,13 @@ export default function Home() {
             if (Math.hypot(x - corePosition.x, y - corePosition.y) < sim.planetRadius + BLOCK) return true;
             return sim.blocks.some((block) => !block.removed && Math.hypot(x - blockPose(block, sim.core).position.x, y - blockPose(block, sim.core).position.y) < BLOCK * 1.9);
           });
-          if (carriedHit && launchPayload(sim, 0, true, now)) { sim.payloadReadyAt = now + 1100; sim.invulnerableUntil = now + 1100; sim.flash = now + 160; sim.message = "Payload sheared free—hull shielding active"; }
+          if (carriedHit && launchPayload(sim, 0, true, now)) {
+            sim.payloadReadyAt = now + PAYLOAD_RELOAD_MS;
+            if (now >= sim.shieldReadyAt) {
+              sim.invulnerableUntil = now + SHIELD_DURATION_MS; sim.shieldReadyAt = sim.invulnerableUntil + SHIELD_REFRACTORY_MS;
+              sim.flash = now + 160; sim.message = "Payload sheared free—hull shielding active";
+            } else sim.message = "Payload sheared free—impact shield still recharging";
+          }
         }
         if (now >= sim.invulnerableUntil && (hitCore || hitAccretion)) { sim.over = true; sim.message = "Hull breach—the terraforming ship struck the growing planetoid"; }
         if (Math.hypot(shipPosition.x, shipPosition.y) > ARENA + 4) { sim.over = true; sim.message = "Navigation lost—the terraforming ship escaped the well"; }
@@ -490,7 +499,8 @@ export default function Home() {
         <div><span>Core drift</span><strong className={hud.drift > .68 ? styles.danger : ""}>{Math.min(999, Math.round(hud.drift * 100))}%</strong><small>LOSS AT 100%</small></div>
         <div><span>Capture field</span><strong>{Math.round(hud.bandCharge * 100)}%</strong><small>NO EMPTY ARC OVER 30°</small></div>
         <div><span>Planet radius</span><strong>{hud.planetRadius.toFixed(1)}</strong><small>GROWS WITH EACH MANTLE</small></div>
-        <div className={styles.loaded}><span>Loaded payload</span><strong>{hud.payloadReady ? "ON SHIP" : "RELOADING"}</strong><small>{hud.shielded ? "HULL SHIELD ACTIVE" : hud.payloadReady ? "BONDED UNTIL IMPACT" : "NEXT PAYLOAD INBOUND"}</small></div>
+        <div><span>Impact shield</span><strong className={!hud.shieldReady && !hud.shielded ? styles.danger : ""}>{hud.shielded ? "ACTIVE" : hud.shieldReady ? "READY" : "REFRACTORY"}</strong><small>{hud.shielded ? "1.1 SECOND GRACE" : hud.shieldReady ? "ARMS ON PAYLOAD SHEAR" : "NO CONSECUTIVE SHIELDS"}</small></div>
+        <div className={styles.loaded}><span>Loaded payload</span><strong>{hud.payloadReady ? "ON SHIP" : "RELOADING"}</strong><small>{hud.payloadReady ? "BONDED UNTIL IMPACT" : "NEXT PAYLOAD INBOUND"}</small></div>
       </aside>
     </section>
     <section className={styles.controls}>
