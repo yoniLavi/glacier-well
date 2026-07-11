@@ -337,7 +337,7 @@ export default function Home() {
 
         const shipPosition = sim.ship.translation(); const corePosition = sim.core.translation();
         const hitCore = Math.hypot(shipPosition.x - corePosition.x, shipPosition.y - corePosition.y) < sim.planetRadius + SHIP_RADIUS;
-        const hitAccretion = sim.blocks.some((block) => block.attached && Math.hypot(shipPosition.x - blockPose(block, sim.core).position.x, shipPosition.y - blockPose(block, sim.core).position.y) < SHIP_RADIUS + BLOCK);
+        const hitIce = sim.blocks.some((block) => !block.removed && Math.hypot(shipPosition.x - blockPose(block, sim.core).position.x, shipPosition.y - blockPose(block, sim.core).position.y) < SHIP_RADIUS + BLOCK);
         if (now >= sim.payloadReadyAt && !sim.absorption) {
           const payload = shipTransform(sim); const carriedHit = SHAPES[sim.nextShape].some(([gx, gy]) => {
             const offset = rotate(gx * BLOCK * 2.05, gy * BLOCK * 2.05, payload.direction); const x = payload.muzzle.x + offset.x; const y = payload.muzzle.y + offset.y;
@@ -352,7 +352,7 @@ export default function Home() {
             } else sim.message = "Payload sheared free—impact shield still recharging";
           }
         }
-        if (now >= sim.invulnerableUntil && (hitCore || hitAccretion)) { sim.over = true; sim.message = "Hull breach—the terraforming ship struck the growing planetoid"; }
+        if (now >= sim.invulnerableUntil && (hitCore || hitIce)) { sim.over = true; sim.message = hitCore ? "Hull breach—the terraforming ship struck the growing planetoid" : "Hull breach—the terraforming ship struck unshielded ice"; }
         if (Math.hypot(shipPosition.x, shipPosition.y) > ARENA + 4) { sim.over = true; sim.message = "Navigation lost—the terraforming ship escaped the well"; }
 
         const fracturedGroups = new Set<number>();
