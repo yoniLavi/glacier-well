@@ -37,7 +37,7 @@ type Sim = {
   escapedGroups: Set<number>;
   nextShape: number; payloadReadyAt: number; invulnerableUntil: number;
   score: number; rings: number; escapes: number; shots: number; over: boolean; paused: boolean;
-  lastTime: number; accumulator: number; groupId: number; flash: number; message: string; absorption: Absorption | null;
+  lastTime: number; accumulator: number; groupId: number; flash: number; fusionNoticeUntil: number; message: string; absorption: Absorption | null;
 };
 type HUD = { ready: boolean; score: number; rings: number; escapes: number; shipSpeed: number; clearance: number; drift: number; bandCharge: number; planetRadius: number; message: string; over: boolean; paused: boolean; absorbing: boolean; nextShape: number; payloadReady: boolean; shielded: boolean };
 
@@ -188,6 +188,7 @@ export default function Home() {
   const fire = useCallback(() => {
     const sim = simRef.current;
     if (!sim || !launchPayload(sim, LAUNCH_SPEED)) return;
+    sim.payloadReadyAt = performance.now() + 1100;
     sim.message = "Projectile committed—watch the torque"; syncHUD(sim);
   }, [syncHUD]);
 
@@ -217,7 +218,7 @@ export default function Home() {
       const ship = world.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setTranslation(0, -25).setRotation(Math.PI / 2).setLinvel(8.2, 0).setLinearDamping(.012).setAngularDamping(1.8).setCcdEnabled(true));
       const shipShape = RAPIER.ColliderDesc.roundConvexHull(new Float32Array([2.1, 0, -.9, -1.15, -1.35, 0, -.9, 1.15]), .22) ?? RAPIER.ColliderDesc.ball(SHIP_RADIUS);
       const shipCollider = world.createCollider(shipShape.setDensity(1.4).setFriction(.55).setRestitution(.12), ship);
-      const sim: Sim = { world, events, core, coreCollider, planetRadius: 3.1, ship, shipCollider, mantles: [], blocks: [], groups: [], escapedGroups: new Set(), nextShape: 2, payloadReadyAt: 0, invulnerableUntil: 0, score: 0, rings: 0, escapes: 0, shots: 0, over: false, paused: false, lastTime: performance.now(), accumulator: 0, groupId: 0, flash: 0, message: "Free flight established—thrust, turn, and seed the planet", absorption: null };
+      const sim: Sim = { world, events, core, coreCollider, planetRadius: 3.1, ship, shipCollider, mantles: [], blocks: [], groups: [], escapedGroups: new Set(), nextShape: 2, payloadReadyAt: 0, invulnerableUntil: 0, score: 0, rings: 0, escapes: 0, shots: 0, over: false, paused: false, lastTime: performance.now(), accumulator: 0, groupId: 0, flash: 0, fusionNoticeUntil: 0, message: "Free flight established—thrust, turn, and seed the planet", absorption: null };
       simRef.current = sim; syncHUD(sim);
     };
 
@@ -295,6 +296,12 @@ export default function Home() {
         const outer = compressedPlanetRadius(sim.planetRadius, sim.absorption.blocks.length); const radius = (sim.planetRadius + outer) / 2 * SCALE;
         ctx.save(); ctx.translate(coreScreen.x, coreScreen.y); ctx.strokeStyle = `rgba(205,235,240,${.22 + absorptionProgress * .78})`; ctx.lineWidth = Math.max(3, (outer - sim.planetRadius) * SCALE * absorptionProgress); ctx.shadowBlur = 5 + absorptionProgress * 16; ctx.shadowColor = "#9cc6cf"; ctx.beginPath(); ctx.arc(0, 0, radius, 0, Math.PI * 2); ctx.stroke();
         ctx.shadowBlur = 0; ctx.textAlign = "center"; ctx.fillStyle = `rgba(225,244,247,${.45 + absorptionProgress * .55})`; ctx.font = "800 10px Arial"; ctx.fillText("MANTLE FUSING", 0, -radius - 12); ctx.restore();
+      }
+
+      if (sim.fusionNoticeUntil > performance.now()) {
+        const remaining = sim.fusionNoticeUntil - performance.now(); const alpha = Math.min(1, remaining / 280);
+        ctx.save(); ctx.textAlign = "center"; ctx.shadowBlur = 18; ctx.shadowColor = "rgba(145,210,220,.8)"; ctx.fillStyle = `rgba(232,246,247,${alpha})`; ctx.font = "900 30px Arial"; ctx.fillText("MANTLE FUSED", VIEW / 2, 78);
+        ctx.shadowBlur = 0; ctx.fillStyle = `rgba(164,201,207,${alpha * .9})`; ctx.font = "700 10px Arial"; ctx.fillText("PLANETARY SHELL EXPANDED", VIEW / 2, 98); ctx.restore();
       }
 
       if (sim.flash > performance.now()) { ctx.fillStyle = `rgba(181,241,255,${Math.max(0, (sim.flash - performance.now()) / 400)})`; ctx.fillRect(0, 0, VIEW, VIEW); }
@@ -417,7 +424,7 @@ export default function Home() {
           sim.world.removeCollider(sim.coreCollider, true);
           sim.coreCollider = sim.world.createCollider(RAPIER.ColliderDesc.ball(sim.planetRadius).setDensity(3).setFriction(1).setRestitution(.06)
             .setActiveEvents(RAPIER.ActiveEvents.CONTACT_FORCE_EVENTS).setContactForceEventThreshold(28), sim.core);
-          sim.rings++; sim.score += 1200; sim.absorption = null;
+          sim.rings++; sim.score += 1200; sim.fusionNoticeUntil = now + 1250; sim.absorption = null;
           releaseDisconnectedIce(sim, now);
           sim.message = "New ice mantle fused—volatiles released into the atmosphere";
         }
