@@ -5,11 +5,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import styles from "./page.module.css";
 
 const ARENA = 34;
-const ORBIT = 29;
 const SCALE = 11;
 const VIEW = 800;
 const BLOCK = .88;
-const BARREL_LENGTH = 3.65;
+const SHIP_NOSE = 2.2;
+const SHIP_RADIUS = 1.25;
+const LAUNCH_SPEED = 20;
 const ICE_COLOR = "#9aaab2";
 const MANTLE_COLORS = ["#68737a", "#7b776f", "#59656b", "#827d73"];
 const SHAPES = [
@@ -24,31 +25,30 @@ const SHAPES = [
 
 type Block = {
   body: RigidBody | null; collider: Collider | null; color: string; group: number;
-  attached: boolean; removed: boolean; born: number; variant: number;
+  attached: boolean; removed: boolean; settledOnce: boolean; born: number; variant: number;
   local?: { x: number; y: number }; localRotation?: number;
 };
 type Group = { id: number; blocks: Block[]; joints: ImpulseJoint[]; fractured: boolean };
 type Absorption = { blocks: Block[]; started: number; duration: number };
 type Sim = {
   world: World; events: EventQueue; core: RigidBody; coreCollider: Collider; planetRadius: number;
+  ship: RigidBody; shipCollider: Collider;
   mantles: Array<{ inner: number; outer: number; color: string }>; blocks: Block[]; groups: Group[];
   escapedGroups: Set<number>;
-  theta: number; omega: number; aim: number; power: number; nextShape: number;
+  nextShape: number; payloadReadyAt: number; invulnerableUntil: number;
   score: number; rings: number; escapes: number; shots: number; over: boolean; paused: boolean;
   lastTime: number; accumulator: number; groupId: number; flash: number; message: string; absorption: Absorption | null;
 };
-type HUD = { ready: boolean; score: number; rings: number; escapes: number; omega: number; aim: number; power: number; drift: number; bandCharge: number; planetRadius: number; message: string; over: boolean; paused: boolean; absorbing: boolean; nextShape: number };
+type HUD = { ready: boolean; score: number; rings: number; escapes: number; shipSpeed: number; clearance: number; drift: number; bandCharge: number; planetRadius: number; message: string; over: boolean; paused: boolean; absorbing: boolean; nextShape: number; payloadReady: boolean; shielded: boolean };
 
-const initialHUD: HUD = { ready: false, score: 0, rings: 0, escapes: 0, omega: .04, aim: 0, power: 20, drift: 0, bandCharge: 0, planetRadius: 3.1, message: "Cooling the gravity well…", over: false, paused: false, absorbing: false, nextShape: 2 };
+const initialHUD: HUD = { ready: false, score: 0, rings: 0, escapes: 0, shipSpeed: 0, clearance: 20, drift: 0, bandCharge: 0, planetRadius: 3.1, message: "Cooling the gravity well…", over: false, paused: false, absorbing: false, nextShape: 2, payloadReady: false, shielded: false };
 const rotate = (x: number, y: number, angle: number) => ({ x: x * Math.cos(angle) - y * Math.sin(angle), y: x * Math.sin(angle) + y * Math.cos(angle) });
 const screen = (x: number, y: number) => ({ x: VIEW / 2 + x * SCALE, y: VIEW / 2 + y * SCALE });
 const gravityStrength = (radius: number) => 3.2 * Math.tanh(radius / 5) + 1.05 * radius * Math.exp(-(radius * radius) / (2 * 22 * 22));
-const cannonTransform = (theta: number, aim: number) => {
-  const radial = { x: Math.cos(theta), y: Math.sin(theta) };
-  const tangent = { x: -radial.y, y: radial.x };
-  const direction = theta + Math.PI + aim;
-  const cannon = { x: radial.x * ORBIT, y: radial.y * ORBIT };
-  return { radial, tangent, direction, cannon, muzzle: { x: cannon.x + Math.cos(direction) * BARREL_LENGTH, y: cannon.y + Math.sin(direction) * BARREL_LENGTH } };
+const shipTransform = (sim: Sim, shape = SHAPES[sim.nextShape]) => {
+  const position = sim.ship.translation(); const direction = sim.ship.rotation();
+  const rearOffset = Math.min(...shape.map(([x]) => x * BLOCK * 2.05)); const payloadDistance = SHIP_NOSE + BLOCK * 1.25 - rearOffset;
+  return { position, direction, muzzle: { x: position.x + Math.cos(direction) * payloadDistance, y: position.y + Math.sin(direction) * payloadDistance } };
 };
 
 function traceIce(ctx: CanvasRenderingContext2D, size: number, variant: number) {
@@ -127,6 +127,32 @@ function iceCollider(variant: number, size = BLOCK) {
   return RAPIER.ColliderDesc.roundConvexHull(points, size * .16) ?? RAPIER.ColliderDesc.roundCuboid(size, size, size * .35);
 }
 
+function launchPayload(sim: Sim, launchSpeed: number, fractured = false, now = performance.now()) {
+  if (sim.over || sim.paused || sim.absorption || now < sim.payloadReadyAt) return false;
+  const shapeIndex = sim.nextShape; const shape = SHAPES[shapeIndex];
+  const { direction, muzzle } = shipTransform(sim); const shipVelocity = sim.ship.linvel();
+  const group: Group = { id: ++sim.groupId, blocks: [], joints: [], fractured };
+  shape.forEach(([gx, gy], blockIndex) => {
+    const offset = rotate(gx * BLOCK * 2.05, gy * BLOCK * 2.05, direction);
+    const body = sim.world.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setTranslation(muzzle.x + offset.x, muzzle.y + offset.y).setRotation(direction)
+      .setLinvel(shipVelocity.x + Math.cos(direction) * launchSpeed, shipVelocity.y + Math.sin(direction) * launchSpeed)
+      .setLinearDamping(.12).setAngularDamping(.18).setCcdEnabled(true));
+    const variant = (group.id + blockIndex) % 3;
+    const collider = sim.world.createCollider(iceCollider(variant).setDensity(.85).setFriction(1).setRestitution(.08)
+      .setActiveEvents(RAPIER.ActiveEvents.CONTACT_FORCE_EVENTS).setContactForceEventThreshold(28), body);
+    const block: Block = { body, collider, color: ICE_COLOR, group: group.id, attached: false, removed: false, settledOnce: false, born: now, variant };
+    group.blocks.push(block); sim.blocks.push(block);
+  });
+  if (!fractured) for (let i = 0; i < shape.length; i++) for (let j = i + 1; j < shape.length; j++) {
+    const dx = shape[j][0] - shape[i][0]; const dy = shape[j][1] - shape[i][1];
+    if (Math.abs(dx) + Math.abs(dy) !== 1) continue;
+    const anchorA = rotate(dx * BLOCK * 1.025, dy * BLOCK * 1.025, 0);
+    group.joints.push(sim.world.createImpulseJoint(RAPIER.JointData.fixed(anchorA, 0, { x: -anchorA.x, y: -anchorA.y }, 0), group.blocks[i].body!, group.blocks[j].body!, true));
+  }
+  sim.groups.push(group); sim.shots++; sim.nextShape = (shapeIndex + 1 + Math.floor(Math.random() * 3)) % SHAPES.length;
+  return true;
+}
+
 export default function Home() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const simRef = useRef<Sim | null>(null);
@@ -137,46 +163,17 @@ export default function Home() {
 
   const syncHUD = useCallback((sim: Sim) => setHud({
     ready: true, score: sim.score, rings: sim.rings, escapes: sim.escapes,
-    omega: sim.omega, aim: sim.aim, power: sim.power, drift: Math.hypot(sim.core.translation().x, sim.core.translation().y) / 25.5, bandCharge: bandCharge(sim), planetRadius: sim.planetRadius,
+    shipSpeed: Math.hypot(sim.ship.linvel().x, sim.ship.linvel().y),
+    clearance: Math.max(0, Math.hypot(sim.ship.translation().x - sim.core.translation().x, sim.ship.translation().y - sim.core.translation().y) - sim.planetRadius - SHIP_RADIUS),
+    drift: Math.hypot(sim.core.translation().x, sim.core.translation().y) / 25.5, bandCharge: bandCharge(sim), planetRadius: sim.planetRadius,
     message: sim.message,
     over: sim.over, paused: sim.paused, absorbing: Boolean(sim.absorption), nextShape: sim.nextShape,
+    payloadReady: performance.now() >= sim.payloadReadyAt, shielded: performance.now() < sim.invulnerableUntil,
   }), []);
 
   const fire = useCallback(() => {
     const sim = simRef.current;
-    if (!sim || sim.over || sim.paused || sim.absorption) return;
-    const shapeIndex = sim.nextShape;
-    const shape = SHAPES[shapeIndex];
-    const color = ICE_COLOR;
-    const { direction, tangent, muzzle } = cannonTransform(sim.theta, sim.aim);
-    const group: Group = { id: ++sim.groupId, blocks: [], joints: [], fractured: false };
-
-    shape.forEach(([gx, gy], blockIndex) => {
-      const offset = rotate(gx * BLOCK * 2.05, gy * BLOCK * 2.05, direction);
-      const body = sim.world.createRigidBody(
-        RAPIER.RigidBodyDesc.dynamic()
-          .setTranslation(muzzle.x + offset.x, muzzle.y + offset.y)
-          .setRotation(direction)
-          .setLinvel(tangent.x * sim.omega * ORBIT + Math.cos(direction) * sim.power, tangent.y * sim.omega * ORBIT + Math.sin(direction) * sim.power)
-          .setLinearDamping(.12).setAngularDamping(.18).setCcdEnabled(true)
-      );
-      const variant = (group.id + blockIndex) % 3;
-      const collider = sim.world.createCollider(
-        iceCollider(variant).setDensity(.85).setFriction(1).setRestitution(.08)
-          .setActiveEvents(RAPIER.ActiveEvents.CONTACT_FORCE_EVENTS).setContactForceEventThreshold(28), body
-      );
-      const block: Block = { body, collider, color, group: group.id, attached: false, removed: false, born: performance.now(), variant };
-      group.blocks.push(block); sim.blocks.push(block);
-    });
-
-    for (let i = 0; i < shape.length; i++) for (let j = i + 1; j < shape.length; j++) {
-      const dx = shape[j][0] - shape[i][0]; const dy = shape[j][1] - shape[i][1];
-      if (Math.abs(dx) + Math.abs(dy) !== 1) continue;
-      const anchorA = rotate(dx * BLOCK * 1.025, dy * BLOCK * 1.025, 0);
-      const anchorB = { x: -anchorA.x, y: -anchorA.y };
-      group.joints.push(sim.world.createImpulseJoint(RAPIER.JointData.fixed(anchorA, 0, anchorB, 0), group.blocks[i].body!, group.blocks[j].body!, true));
-    }
-    sim.groups.push(group); sim.shots++; sim.nextShape = (shapeIndex + 1 + Math.floor(Math.random() * 3)) % SHAPES.length;
+    if (!sim || !launchPayload(sim, LAUNCH_SPEED)) return;
     sim.message = "Projectile committed—watch the torque"; syncHUD(sim);
   }, [syncHUD]);
 
@@ -203,7 +200,10 @@ export default function Home() {
       const events = new RAPIER.EventQueue(true);
       const core = world.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setLinearDamping(.01).setAngularDamping(.012).setAdditionalMass(18));
       const coreCollider = world.createCollider(RAPIER.ColliderDesc.ball(3.1).setDensity(3).setFriction(1).setRestitution(.08).setActiveEvents(RAPIER.ActiveEvents.CONTACT_FORCE_EVENTS).setContactForceEventThreshold(28), core);
-      const sim: Sim = { world, events, core, coreCollider, planetRadius: 3.1, mantles: [], blocks: [], groups: [], escapedGroups: new Set(), theta: -Math.PI * .72, omega: .04, aim: 0, power: 20, nextShape: 2, score: 0, rings: 0, escapes: 0, shots: 0, over: false, paused: false, lastTime: performance.now(), accumulator: 0, groupId: 0, flash: 0, message: "A bare core awaits its first comet", absorption: null };
+      const ship = world.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setTranslation(0, -25).setRotation(Math.PI / 2).setLinvel(8.2, 0).setLinearDamping(.012).setAngularDamping(1.8).setCcdEnabled(true));
+      const shipShape = RAPIER.ColliderDesc.roundConvexHull(new Float32Array([2.1, 0, -.9, -1.15, -1.35, 0, -.9, 1.15]), .22) ?? RAPIER.ColliderDesc.ball(SHIP_RADIUS);
+      const shipCollider = world.createCollider(shipShape.setDensity(1.4).setFriction(.55).setRestitution(.12), ship);
+      const sim: Sim = { world, events, core, coreCollider, planetRadius: 3.1, ship, shipCollider, mantles: [], blocks: [], groups: [], escapedGroups: new Set(), nextShape: 2, payloadReadyAt: 0, invulnerableUntil: 0, score: 0, rings: 0, escapes: 0, shots: 0, over: false, paused: false, lastTime: performance.now(), accumulator: 0, groupId: 0, flash: 0, message: "Free flight established—thrust, turn, and seed the planet", absorption: null };
       simRef.current = sim; syncHUD(sim);
     };
 
@@ -216,8 +216,8 @@ export default function Home() {
       gradient.addColorStop(0, "#164b70"); gradient.addColorStop(.35, "#0c2b48"); gradient.addColorStop(1, "#061522");
       ctx.fillStyle = gradient; ctx.beginPath(); ctx.arc(VIEW / 2, VIEW / 2, ARENA * SCALE, 0, Math.PI * 2); ctx.fill();
 
-      // The cannon orbit belongs to the fixed well; scoring bands belong to the moving asteroid.
-      ctx.save(); ctx.translate(VIEW / 2, VIEW / 2); ctx.setLineDash([7, 10]); ctx.strokeStyle = "rgba(122,231,255,.34)"; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(0, 0, ORBIT * SCALE, 0, Math.PI * 2); ctx.stroke(); ctx.restore();
+      // The outer rim is the safe navigation boundary; the ship is otherwise free-moving.
+      ctx.save(); ctx.translate(VIEW / 2, VIEW / 2); ctx.setLineDash([8, 12]); ctx.strokeStyle = "rgba(122,231,255,.24)"; ctx.lineWidth = 1.2; ctx.beginPath(); ctx.arc(0, 0, ARENA * SCALE, 0, Math.PI * 2); ctx.stroke(); ctx.restore();
       const coreWorld = sim.core.translation(); const coreScreen = screen(coreWorld.x, coreWorld.y);
       ctx.save(); ctx.translate(coreScreen.x, coreScreen.y);
       const field = captureField(sim); const charge = bandCharge(sim); const atmosphereRadius = ((field.inner + field.outer) / 2) * SCALE;
@@ -225,14 +225,16 @@ export default function Home() {
       ctx.shadowBlur = 0; ctx.fillStyle = `rgba(190,237,255,${.42 + charge * .5})`; ctx.textAlign = "center"; ctx.font = "800 9px Arial"; ctx.fillText(`CAPTURE FIELD  ${Math.round(charge * 100)}%`, 0, -atmosphereRadius - 13);
       ctx.restore();
 
-      // Preview and projectile use the exact same cannon-tip transform and velocity.
-      const cannonState = cannonTransform(sim.theta, sim.aim);
-      let px = cannonState.muzzle.x, py = cannonState.muzzle.y;
-      let vx = cannonState.tangent.x * sim.omega * ORBIT + Math.cos(cannonState.direction) * sim.power;
-      let vy = cannonState.tangent.y * sim.omega * ORBIT + Math.sin(cannonState.direction) * sim.power;
-      ctx.beginPath(); const first = screen(px, py); ctx.moveTo(first.x, first.y);
-      for (let i = 0; i < 90; i++) { const r = Math.hypot(px, py) || 1; const f = gravityStrength(r); const drag = Math.max(0, (18 - r) / 18) * 1.8; vx += ((-px / r) * f - vx * drag) * .035; vy += ((-py / r) * f - vy * drag) * .035; px += vx * .035; py += vy * .035; const p = screen(px, py); ctx.lineTo(p.x, p.y); }
-      ctx.strokeStyle = "rgba(125,234,255,.33)"; ctx.lineWidth = 2; ctx.setLineDash([3, 8]); ctx.stroke(); ctx.setLineDash([]);
+      // Preview and projectile share the ship's exact muzzle transform and inherited velocity.
+      const shipState = shipTransform(sim); const shipVelocity = sim.ship.linvel();
+      if (performance.now() >= sim.payloadReadyAt) {
+        let px = shipState.muzzle.x, py = shipState.muzzle.y;
+        let vx = shipVelocity.x + Math.cos(shipState.direction) * LAUNCH_SPEED;
+        let vy = shipVelocity.y + Math.sin(shipState.direction) * LAUNCH_SPEED;
+        ctx.beginPath(); const first = screen(px, py); ctx.moveTo(first.x, first.y);
+        for (let i = 0; i < 90; i++) { const r = Math.hypot(px, py) || 1; const f = gravityStrength(r); const drag = Math.max(0, (18 - r) / 18) * 1.8; vx += ((-px / r) * f - vx * drag) * .035; vy += ((-py / r) * f - vy * drag) * .035; px += vx * .035; py += vy * .035; const p = screen(px, py); ctx.lineTo(p.x, p.y); }
+        ctx.strokeStyle = "rgba(125,234,255,.33)"; ctx.lineWidth = 2; ctx.setLineDash([3, 8]); ctx.stroke(); ctx.setLineDash([]);
+      }
 
       // Intact tetrominoes get visible ice bonds; only an impact can remove them.
       sim.groups.filter((group) => !group.fractured).forEach((group) => {
@@ -258,14 +260,19 @@ export default function Home() {
       ctx.shadowBlur = 0; sim.mantles.forEach((mantle) => { ctx.strokeStyle = mantle.color; ctx.lineWidth = (mantle.outer - mantle.inner) * SCALE; ctx.beginPath(); ctx.arc(0, 0, ((mantle.inner + mantle.outer) / 2) * SCALE, 0, Math.PI * 2); ctx.stroke(); });
       ctx.shadowBlur = 0; ctx.fillStyle = "rgba(79,190,220,.22)"; ctx.beginPath(); ctx.ellipse(-10, -7, 7, 4, -.35, 0, Math.PI * 2); ctx.fill(); ctx.beginPath(); ctx.ellipse(12, 9, 4, 6, .4, 0, Math.PI * 2); ctx.fill(); ctx.restore();
 
-      const cannon = screen(cannonState.cannon.x, cannonState.cannon.y);
-      ctx.save(); ctx.translate(cannon.x, cannon.y); ctx.rotate(cannonState.direction); ctx.shadowBlur = 18; ctx.shadowColor = "#65ddff"; ctx.fillStyle = "#77e7ff"; ctx.beginPath(); ctx.roundRect(-15, -14, 40, 28, 8); ctx.fill(); ctx.fillStyle = "#dffaff"; ctx.fillRect(10, -6, 30, 12); ctx.restore();
+      const shipPoint = screen(shipState.position.x, shipState.position.y); const thrusting = keysRef.current.has("w") || keysRef.current.has("ArrowUp");
+      ctx.save(); ctx.translate(shipPoint.x, shipPoint.y); ctx.rotate(shipState.direction); ctx.shadowBlur = 16; ctx.shadowColor = "#65ddff";
+      if (thrusting) { ctx.fillStyle = "rgba(109,224,255,.78)"; ctx.beginPath(); ctx.moveTo(-12, -7); ctx.lineTo(-30 - Math.random() * 9, 0); ctx.lineTo(-12, 7); ctx.closePath(); ctx.fill(); }
+      ctx.fillStyle = "#8fa9b5"; ctx.beginPath(); ctx.moveTo(24, 0); ctx.lineTo(-12, -13); ctx.lineTo(-7, 0); ctx.lineTo(-12, 13); ctx.closePath(); ctx.fill();
+      ctx.strokeStyle = "rgba(226,242,247,.72)"; ctx.lineWidth = 2; ctx.stroke(); ctx.fillStyle = "#dffaff"; ctx.beginPath(); ctx.arc(4, 0, 5, 0, Math.PI * 2); ctx.fill(); ctx.restore();
+
+      if (performance.now() < sim.invulnerableUntil) { const pulse = 21 + Math.sin(performance.now() / 65) * 2; ctx.save(); ctx.translate(shipPoint.x, shipPoint.y); ctx.strokeStyle = "rgba(124,236,255,.88)"; ctx.lineWidth = 2.5; ctx.shadowBlur = 18; ctx.shadowColor = "#6fe8ff"; ctx.beginPath(); ctx.arc(0, 0, pulse, 0, Math.PI * 2); ctx.stroke(); ctx.restore(); }
 
       // The next bonded tetromino is visibly loaded on the muzzle.
       const loadedColor = ICE_COLOR;
-      SHAPES[sim.nextShape].forEach(([gx, gy], index) => {
-        const offset = rotate(gx * BLOCK * 2.05, gy * BLOCK * 2.05, cannonState.direction); const p = screen(cannonState.muzzle.x + offset.x, cannonState.muzzle.y + offset.y);
-        ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(cannonState.direction); ctx.shadowBlur = 6; ctx.shadowColor = "rgba(145,170,182,.45)"; ctx.fillStyle = loadedColor; traceIce(ctx, BLOCK * SCALE, index % 3); ctx.fill(); ctx.strokeStyle = "rgba(225,235,239,.55)"; ctx.lineWidth = 1.2; ctx.stroke(); ctx.restore();
+      if (performance.now() >= sim.payloadReadyAt) SHAPES[sim.nextShape].forEach(([gx, gy], index) => {
+        const offset = rotate(gx * BLOCK * 2.05, gy * BLOCK * 2.05, shipState.direction); const p = screen(shipState.muzzle.x + offset.x, shipState.muzzle.y + offset.y);
+        ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(shipState.direction); ctx.shadowBlur = 6; ctx.shadowColor = "rgba(145,170,182,.45)"; ctx.fillStyle = loadedColor; traceIce(ctx, BLOCK * SCALE, index % 3); ctx.fill(); ctx.strokeStyle = "rgba(225,235,239,.55)"; ctx.lineWidth = 1.2; ctx.stroke(); ctx.restore();
       });
 
       if (sim.absorption) {
@@ -284,10 +291,8 @@ export default function Home() {
       const dt = Math.min(.035, (now - sim.lastTime) / 1000); sim.lastTime = now;
       if (!sim.paused && !sim.over) {
         const keys = keysRef.current;
-        const thrust = (keys.has("ArrowRight") || keys.has("d") ? 1 : 0) - (keys.has("ArrowLeft") || keys.has("a") ? 1 : 0);
-        const aiming = (keys.has("ArrowDown") || keys.has("s") ? 1 : 0) - (keys.has("ArrowUp") || keys.has("w") ? 1 : 0);
-        sim.omega += thrust * .14 * dt; sim.omega *= Math.pow(.9998, dt * 60); sim.omega = Math.max(-.32, Math.min(.32, sim.omega));
-        sim.aim = Math.max(-1.15, Math.min(1.15, sim.aim + aiming * 1.25 * dt)); sim.theta += sim.omega * dt;
+        const turn = (keys.has("ArrowRight") || keys.has("d") ? 1 : 0) - (keys.has("ArrowLeft") || keys.has("a") ? 1 : 0);
+        const drive = (keys.has("ArrowUp") || keys.has("w") ? 1 : 0) - (keys.has("ArrowDown") || keys.has("s") ? .55 : 0);
         sim.accumulator += dt;
         while (sim.accumulator >= 1 / 60) {
           sim.blocks.forEach((block) => {
@@ -300,8 +305,25 @@ export default function Home() {
           const corePos = sim.core.translation(); const coreRadius = Math.hypot(corePos.x, corePos.y);
           sim.core.resetForces(true);
           if (coreRadius > .02) { const coreVelocity = sim.core.linvel(); const coreMass = sim.core.mass(); const restoring = gravityStrength(coreRadius) * coreMass * .45; sim.core.addForce({ x: -corePos.x / coreRadius * restoring - coreVelocity.x * .025 * coreMass, y: -corePos.y / coreRadius * restoring - coreVelocity.y * .025 * coreMass }, true); }
+          const shipPosition = sim.ship.translation(); const shipRadius = Math.hypot(shipPosition.x, shipPosition.y) || 1; const shipMass = sim.ship.mass(); const shipGravity = gravityStrength(shipRadius) * shipMass * .16; const heading = sim.ship.rotation();
+          sim.ship.resetForces(true); sim.ship.setAngvel(turn * 1.65, true);
+          sim.ship.addForce({ x: -shipPosition.x / shipRadius * shipGravity + Math.cos(heading) * drive * 8.5 * shipMass, y: -shipPosition.y / shipRadius * shipGravity + Math.sin(heading) * drive * 8.5 * shipMass }, true);
           sim.world.step(sim.events); sim.accumulator -= 1 / 60;
         }
+
+        const shipPosition = sim.ship.translation(); const corePosition = sim.core.translation();
+        const hitCore = Math.hypot(shipPosition.x - corePosition.x, shipPosition.y - corePosition.y) < sim.planetRadius + SHIP_RADIUS;
+        const hitAccretion = sim.blocks.some((block) => block.attached && Math.hypot(shipPosition.x - blockPose(block, sim.core).position.x, shipPosition.y - blockPose(block, sim.core).position.y) < SHIP_RADIUS + BLOCK);
+        if (now >= sim.payloadReadyAt && !sim.absorption) {
+          const payload = shipTransform(sim); const carriedHit = SHAPES[sim.nextShape].some(([gx, gy]) => {
+            const offset = rotate(gx * BLOCK * 2.05, gy * BLOCK * 2.05, payload.direction); const x = payload.muzzle.x + offset.x; const y = payload.muzzle.y + offset.y;
+            if (Math.hypot(x - corePosition.x, y - corePosition.y) < sim.planetRadius + BLOCK) return true;
+            return sim.blocks.some((block) => !block.removed && Math.hypot(x - blockPose(block, sim.core).position.x, y - blockPose(block, sim.core).position.y) < BLOCK * 1.9);
+          });
+          if (carriedHit && launchPayload(sim, 0, true, now)) { sim.payloadReadyAt = now + 1100; sim.invulnerableUntil = now + 1100; sim.flash = now + 160; sim.message = "Payload sheared free—hull shielding active"; }
+        }
+        if (now >= sim.invulnerableUntil && (hitCore || hitAccretion)) { sim.over = true; sim.message = "Hull breach—the terraforming ship struck the growing planetoid"; }
+        if (Math.hypot(shipPosition.x, shipPosition.y) > ARENA + 4) { sim.over = true; sim.message = "Navigation lost—the terraforming ship escaped the well"; }
 
         const fracturedGroups = new Set<number>();
         const hardHits: Array<{ attached: Block; incoming: Block }> = [];
@@ -309,7 +331,7 @@ export default function Home() {
           const force = event.maxForceMagnitude();
           const blockA = sim.blocks.find((item) => item.collider?.handle === event.collider1());
           const blockB = sim.blocks.find((item) => item.collider?.handle === event.collider2());
-          if (!sim.absorption && force > 290) {
+          if (!sim.absorption && force > 290 && blockA?.group !== blockB?.group) {
             if (blockA?.attached && blockB?.body) hardHits.push({ attached: blockA, incoming: blockB });
             if (blockB?.attached && blockA?.body) hardHits.push({ attached: blockB, incoming: blockA });
           }
@@ -364,7 +386,8 @@ export default function Home() {
               const compound = iceCollider(block.variant).setTranslation(local.x, local.y).setRotation(localRotation).setDensity(.85).setFriction(1).setRestitution(.04)
                 .setActiveEvents(RAPIER.ActiveEvents.CONTACT_FORCE_EVENTS).setContactForceEventThreshold(28);
               sim.world.removeRigidBody(body); block.body = null; block.collider = sim.world.createCollider(compound, sim.core);
-              block.local = local; block.localRotation = localRotation; block.attached = true; sim.score += 10;
+              block.local = local; block.localRotation = localRotation; block.attached = true;
+              if (!block.settledOnce) { block.settledOnce = true; sim.score += 10; }
             } catch {}
           }
         });
@@ -416,11 +439,16 @@ export default function Home() {
     window.addEventListener("keydown", down); window.addEventListener("keyup", up); return () => { window.removeEventListener("keydown", down); window.removeEventListener("keyup", up); };
   }, [fire, syncHUD]);
 
-  const nudge = (kind: "orbit" | "aim" | "power", amount: number) => { const sim = simRef.current; if (!sim) return; if (kind === "orbit") sim.omega = Math.max(-.32, Math.min(.32, sim.omega + amount)); if (kind === "aim") sim.aim = Math.max(-1.15, Math.min(1.15, sim.aim + amount)); if (kind === "power") sim.power = Math.max(12, Math.min(28, sim.power + amount)); syncHUD(sim); };
+  const commandShip = (kind: "left" | "right" | "thrust" | "reverse") => {
+    const sim = simRef.current; if (!sim || sim.over) return;
+    if (kind === "left" || kind === "right") { sim.ship.setRotation(sim.ship.rotation() + (kind === "left" ? -.18 : .18), true); sim.ship.setAngvel(0, true); }
+    else { const scale = kind === "thrust" ? 1.4 : -.8; const angle = sim.ship.rotation(); sim.ship.applyImpulse({ x: Math.cos(angle) * scale * sim.ship.mass(), y: Math.sin(angle) * scale * sim.ship.mass() }, true); }
+    syncHUD(sim);
+  };
   const pause = () => { const sim = simRef.current; if (!sim || sim.over) return; sim.paused = !sim.paused; sim.message = sim.paused ? "Time frozen" : "Orbit resumed"; syncHUD(sim); };
 
   return <main className={styles.page}>
-    <header><div><span>Orbital terraforming mission</span><h1>GLACIER <b>WELL</b></h1></div><p>Saturate the capture field with cometary ice. Compress new mantles, release volatile atmosphere, and grow a world.</p></header>
+    <header><div><span>Free-flight terraforming mission</span><h1>GLACIER <b>WELL</b></h1></div><p>Pilot by inertia, launch cometary ice, and grow a world—without letting your ship become part of it.</p></header>
     <section className={styles.layout}>
       <aside className={styles.stats}>
         <div><span>Score</span><strong>{hud.score.toString().padStart(5, "0")}</strong></div>
@@ -431,27 +459,26 @@ export default function Home() {
       <div className={styles.canvasWrap}>
         <canvas ref={canvasRef} width={VIEW} height={VIEW} aria-label="Orbital physics game canvas" />
         {!hud.ready && <div className={styles.overlay}>INITIALIZING PHYSICS</div>}
-        {hud.over && <div className={styles.overlay}><b>ORBIT LOST</b><span>{hud.message}</span><button onClick={reset}>Restart experiment</button></div>}
+        {hud.over && <div className={styles.overlay}><b>MISSION LOST</b><span>{hud.message}</span><button onClick={reset}>Restart mission</button></div>}
         {hud.paused && !hud.over && <div className={styles.overlay}><b>TIME FROZEN</b><button onClick={pause}>Resume</button></div>}
       </div>
       <aside className={styles.telemetry}>
-        <div><span>Orbital velocity</span><strong>{hud.omega >= 0 ? "+" : ""}{hud.omega.toFixed(2)}</strong><small>RAD / SEC</small></div>
-        <div><span>Firing angle</span><strong>{Math.round(hud.aim * 180 / Math.PI)}°</strong><small>FROM RADIAL</small></div>
-        <div><span>Launch force</span><strong>{hud.power.toFixed(0)}</strong><small>IMPULSE</small></div>
+        <div><span>Ship speed</span><strong>{hud.shipSpeed.toFixed(1)}</strong><small>INERTIAL VELOCITY</small></div>
+        <div><span>Hull clearance</span><strong className={hud.clearance < 5 ? styles.danger : ""}>{hud.clearance.toFixed(1)}</strong><small>TO PLANET SURFACE</small></div>
+        <div><span>Payload impulse</span><strong>{LAUNCH_SPEED}</strong><small>PLUS SHIP VELOCITY</small></div>
         <div><span>Core drift</span><strong className={hud.drift > .68 ? styles.danger : ""}>{Math.min(999, Math.round(hud.drift * 100))}%</strong><small>LOSS AT 100%</small></div>
         <div><span>Capture field</span><strong>{Math.round(hud.bandCharge * 100)}%</strong><small>COMPRESSES AT 100%</small></div>
         <div><span>Planet radius</span><strong>{hud.planetRadius.toFixed(1)}</strong><small>GROWS WITH EACH MANTLE</small></div>
-        <div className={styles.loaded}><span>Loaded payload</span><strong>ON CANNON</strong><small>BONDED UNTIL IMPACT</small></div>
+        <div className={styles.loaded}><span>Loaded payload</span><strong>{hud.payloadReady ? "ON SHIP" : "RELOADING"}</strong><small>{hud.shielded ? "HULL SHIELD ACTIVE" : hud.payloadReady ? "BONDED UNTIL IMPACT" : "NEXT PAYLOAD INBOUND"}</small></div>
       </aside>
     </section>
     <section className={styles.controls}>
-      <div><span>ORBIT</span><button onClick={() => nudge("orbit", -.025)}>◀ THRUST</button><button onClick={() => nudge("orbit", .025)}>THRUST ▶</button></div>
-      <div><span>AIM</span><button onClick={() => nudge("aim", -.08)}>− ANGLE</button><button onClick={() => nudge("aim", .08)}>+ ANGLE</button></div>
-      <button className={styles.fire} onClick={fire} disabled={!hud.ready || hud.over || hud.absorbing}>{hud.absorbing ? "ABSORBING" : "FIRE"} <small>{hud.absorbing ? "OBJECTIVE COMPLETE" : "SPACE"}</small></button>
-      <div><span>POWER</span><button onClick={() => nudge("power", -2)}>−</button><button onClick={() => nudge("power", 2)}>+</button></div>
+      <div><span>STEER</span><button onClick={() => commandShip("left")}>↶ ROTATE</button><button onClick={() => commandShip("right")}>ROTATE ↷</button></div>
+      <div><span>DRIVE</span><button onClick={() => commandShip("reverse")}>REVERSE</button><button onClick={() => commandShip("thrust")}>THRUST</button></div>
+      <button className={styles.fire} onClick={fire} disabled={!hud.ready || hud.over || hud.absorbing || !hud.payloadReady}>{hud.absorbing ? "ABSORBING" : !hud.payloadReady ? "RELOADING" : "FIRE"} <small>{hud.absorbing ? "OBJECTIVE COMPLETE" : hud.shielded ? "SHIELD ACTIVE" : "SPACE"}</small></button>
       <button className={styles.pause} onClick={pause}>{hud.paused ? "RESUME" : "PAUSE"}</button>
     </section>
     <div className={styles.message}>{hud.message}</div>
-    <footer><kbd>A D</kbd> orbital thrust <kbd>W S</kbd> aim barrel <kbd>SPACE</kbd> fire <kbd>P</kbd> pause</footer>
+    <footer><kbd>A D</kbd> rotate <kbd>W</kbd> thrust <kbd>S</kbd> reverse <kbd>SPACE</kbd> fire <kbd>P</kbd> pause</footer>
   </main>;
 }

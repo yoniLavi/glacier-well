@@ -3,7 +3,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Glacier Well",
-  description: "Grow and terraform a wandering planet with captured cometary ice",
+  description: "Pilot an inertial terraforming ship and grow a wandering planet",
 };
 
 export default function RootLayout({
