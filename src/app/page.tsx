@@ -11,6 +11,7 @@ const BLOCK = .88;
 const SHIP_NOSE = 2.2;
 const SHIP_RADIUS = 1.25;
 const LAUNCH_SPEED = 20;
+const BOND_BREAK_FORCE = 250;
 const ICE_COLOR = "#9aaab2";
 const MANTLE_COLORS = ["#68737a", "#7b776f", "#59656b", "#827d73"];
 const SHAPES = [
@@ -355,7 +356,9 @@ export default function Home() {
             if (blockA?.attached && blockB?.body) hardHits.push({ attached: blockA, incoming: blockB });
             if (blockB?.attached && blockA?.body) hardHits.push({ attached: blockB, incoming: blockA });
           }
-          if (force < 130) return;
+          // Bond failure follows actual impact force, so longer gravity-assisted shots
+          // are more likely to fracture than gentle, close-range placement shots.
+          if (force < BOND_BREAK_FORCE) return;
           if (blockA && blockB && blockA.group === blockB.group) return;
           if (blockA && blockA.group > 0) fracturedGroups.add(blockA.group);
           if (blockB && blockB.group > 0) fracturedGroups.add(blockB.group);
